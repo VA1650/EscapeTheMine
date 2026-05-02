@@ -1,0 +1,46 @@
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenCentral()
+    mavenLocal()
+
+    maven {
+        name = "spigotmc-repo"
+        url = "https://hub.spigotmc.org/nexus/content/repositories/snapshots/"
+    }
+    maven {
+        name = "sonatype"
+        url = "https://oss.sonatype.org/content/groups/public/"
+    }
+
+}
+
+dependencies {
+    annotationProcessor compileOnly("org.projectlombok:lombok:1.18.30")
+    implementation 'org.jetbrains:annotations:25.0.0'
+    compileOnly 'org.spigotmc:spigot-api:1.12.2-R0.1-SNAPSHOT'
+
+}
+
+configurations.all {
+    resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
+}
+jar {
+    from {
+        configurations.runtimeClasspath.collect { it.directory ? it : zipTree(it) }
+    }
+    duplicatesStrategy DuplicatesStrategy.EXCLUDE
+}
+
+java {
+    toolchain.languageVersion.set(JavaLanguageVersion.of(8))
+    withSourcesJar()
+}
+tasks.withType(JavaCompile).tap {
+    configureEach {
+        options.encoding = "UTF-8"
+        sourceCompatibility = targetCompatibility = "1.8"
+    }
+}

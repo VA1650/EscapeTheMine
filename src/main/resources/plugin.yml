@@ -1,0 +1,11 @@
+name: EscapeTheMine
+main: me.annie312.EscapeTheMine
+version: 0.0.2
+api-version: 1.12.2
+author: Annie312
+
+commands:
+  etm:
+    description: Главная команда
+  lobby:
+    description: Зайти в лобби
