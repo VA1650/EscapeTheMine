@@ -1,7 +1,9 @@
 package me.annie312;
 
 import lombok.Getter;
+import me.annie312.arena.Arena;
 import org.bukkit.Bukkit;
+import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
@@ -9,11 +11,15 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
+import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -21,82 +27,114 @@ import java.util.UUID;
 
 public class GameListener implements Listener {
     private final EscapeTheMine plugin;
-    @Getter private final Map<UUID, Integer> repairProgress = new HashMap<>();
+    @Getter
+    private final Map<UUID, Integer> repairProgress = new HashMap<>();
     private final Map<UUID, Location> currentRepairingBlock = new HashMap<>();
 
     public GameListener(EscapeTheMine plugin) {
         this.plugin = plugin;
     }
 
+    private Arena getActiveMatch(Player p) {
+        Arena a = plugin.getArenaManager().getArenaByPlayer(p);
+        if (a == null || a.getGameState() != GameState.INGAME) return null;
+        return a;
+    }
+
     @EventHandler
     public void onMove(PlayerMoveEvent event) {
         Player p = event.getPlayer();
         UUID uuid = p.getUniqueId();
-        TeamManager tm = plugin.getTeamManager();
+        Arena arena = getActiveMatch(p);
+        if (arena == null) return;
 
-        // Сброс починки при ходьбе
-        if (event.getFrom().getBlockX() != event.getTo().getBlockX() || event.getFrom().getBlockZ() != event.getTo().getBlockZ()) {
-            if (repairProgress.containsKey(uuid)) {
-                repairProgress.remove(uuid);
-                currentRepairingBlock.remove(uuid);
-                p.spigot().sendMessage(net.md_5.bungee.api.ChatMessageType.ACTION_BAR, new net.md_5.bungee.api.chat.TextComponent("§cПочинка прервана!"));
-            }
+        if (hasPlayerMoved(event)) {
+            handleRepairInterruption(p, uuid);
+            handleFrozenMovement(event, arena, uuid);
         }
+        handleDragging(arena, uuid, p);
+    }
 
-        // Конвоирование (UUID-based)
-        if (tm.getDragging().containsKey(uuid)) {
-            Player victim = Bukkit.getPlayer(tm.getDragging().get(uuid));
-            if (victim != null) {
-                victim.teleport(p.getLocation());
-                Location cell = plugin.getConfigManager().getLoc("cell");
-                if (cell != null && p.getLocation().distance(cell) < 2.5) {
-                    UUID vId = victim.getUniqueId();
-                    tm.getDragging().remove(uuid);
-                    tm.getCapturedPrisoners().add(vId);
-                    victim.teleport(cell);
-                    p.sendMessage("§a§l[!] §fПосажен!");
-                    tm.checkWinConditions();
-                }
-            }
+    private boolean hasPlayerMoved(PlayerMoveEvent event) {
+        return event.getFrom().getBlockX() != event.getTo().getBlockX()
+                || event.getFrom().getBlockZ() != event.getTo().getBlockZ();
+    }
+
+    private void handleRepairInterruption(Player p, UUID uuid) {
+        if (repairProgress.containsKey(uuid)) {
+            repairProgress.remove(uuid);
+            currentRepairingBlock.remove(uuid);
+            p.spigot().sendMessage(net.md_5.bungee.api.ChatMessageType.ACTION_BAR,
+                    new net.md_5.bungee.api.chat.TextComponent("§cПочинка прервана!"));
         }
+    }
 
-        // Заморозка
-        if (tm.getFrozenPlayers().contains(uuid) && !tm.getDragging().containsValue(uuid)) {
-            if (event.getFrom().getBlockX() != event.getTo().getBlockX() || event.getFrom().getBlockZ() != event.getTo().getBlockZ()) {
-                event.setTo(event.getFrom());
-            }
+    private void handleFrozenMovement(PlayerMoveEvent event, Arena arena, UUID uuid) {
+        if (arena.getFrozenPlayers().contains(uuid) && !arena.getDragging().containsValue(uuid)) {
+            event.setTo(event.getFrom());
+        }
+    }
+
+    private void handleDragging(Arena arena, UUID uuid, Player p) {
+        if (!arena.getDragging().containsKey(uuid)) return;
+        Player victim = Bukkit.getPlayer(arena.getDragging().get(uuid));
+        if (victim == null) return;
+        victim.teleport(p.getLocation());
+        Location cell = plugin.getConfigManager().getLocInWorld(arena.getWorld(), "cell");
+        if (cell != null && p.getLocation().distance(cell) < 2.5) {
+            UUID vId = victim.getUniqueId();
+            arena.getDragging().remove(uuid);
+            arena.getCapturedPrisoners().add(vId);
+            victim.teleport(cell);
+            p.sendMessage("§a§l[!] §fПосажен!");
+            arena.checkWinConditions();
         }
     }
 
     @EventHandler
     public void onRepair(PlayerInteractEvent event) {
-        if (event.getAction() != Action.RIGHT_CLICK_BLOCK || event.getClickedBlock().getType() != Material.WORKBENCH) return;
-
+        if (!isValidRepairAction(event)) return;
         Player p = event.getPlayer();
+        Arena arena = getActiveMatch(p);
+        if (arena == null) return;
         UUID uuid = p.getUniqueId();
-        TeamManager tm = plugin.getTeamManager();
 
-        // ПРОВЕРКА 1: Ты зэк?
-        if (!tm.getPrisoners().contains(uuid)) return;
-
-        // ПРОВЕРКА 2: Ты в тюрьме? (Запрещаем чинить)
-        if (tm.getCapturedPrisoners().contains(uuid) || tm.getDragging().containsValue(uuid)) {
-            p.spigot().sendMessage(net.md_5.bungee.api.ChatMessageType.ACTION_BAR,
-                    new net.md_5.bungee.api.chat.TextComponent("§cВы не можете чинить, пока пойманы!"));
-            return;
-        }
+        if (!canPlayerRepair(p, uuid, arena)) return;
 
         event.setCancelled(true);
         Location loc = event.getClickedBlock().getLocation();
-        String timeStr = plugin.getGameManager().getTimeString(plugin.getGameManager().getCurrentTimeLeft());
+        String timeStr = Arena.formatTime(arena.getTimeLeftSeconds());
 
-        // ПРОВЕРКА 3: Дистанция + Таймер (чтобы не дергалось)
+        if (!isInRepairRange(p, loc, timeStr)) return;
+
+        handleRepairProgress(p, uuid, loc, timeStr, arena);
+    }
+
+    private boolean isValidRepairAction(PlayerInteractEvent event) {
+        return event.getAction() == Action.RIGHT_CLICK_BLOCK
+                && event.getClickedBlock().getType() == Material.WORKBENCH;
+    }
+
+    private boolean canPlayerRepair(Player p, UUID uuid, Arena arena) {
+        if (!arena.getPrisoners().contains(uuid)) return false;
+        if (arena.getCapturedPrisoners().contains(uuid) || arena.getDragging().containsValue(uuid)) {
+            p.spigot().sendMessage(net.md_5.bungee.api.ChatMessageType.ACTION_BAR,
+                    new net.md_5.bungee.api.chat.TextComponent("§cНельзя чинить, пока пойман!"));
+            return false;
+        }
+        return true;
+    }
+
+    private boolean isInRepairRange(Player p, Location loc, String timeStr) {
         if (p.getLocation().distance(loc) > 3.5) {
             p.spigot().sendMessage(net.md_5.bungee.api.ChatMessageType.ACTION_BAR,
                     new net.md_5.bungee.api.chat.TextComponent("§7[" + timeStr + "] §c§l! СЛИШКОМ ДАЛЕКО !"));
-            return;
+            return false;
         }
+        return true;
+    }
 
+    private void handleRepairProgress(Player p, UUID uuid, Location loc, String timeStr, Arena arena) {
         if (currentRepairingBlock.containsKey(uuid) && currentRepairingBlock.get(uuid).distance(loc) > 0.5) {
             repairProgress.put(uuid, 0);
         }
@@ -105,17 +143,13 @@ public class GameListener implements Listener {
         int max = 50;
         int progress = repairProgress.getOrDefault(uuid, 0) + 1;
 
-        // ОБНОВЛЕННАЯ МАТЕМАТИКА ПОЛОСКИ
-        // Теперь она доползает до конца ровно на 50-м клике
         if (progress >= max) {
             p.spigot().sendMessage(net.md_5.bungee.api.ChatMessageType.ACTION_BAR,
-                    new net.md_5.bungee.api.chat.TextComponent("§7[" + timeStr + "] " + getProgressBar(max, max)));
-
+                    new net.md_5.bungee.api.chat.TextComponent("§7[" + timeStr + "] " + getProgressBar(50, 50)));
             repairProgress.remove(uuid);
             currentRepairingBlock.remove(uuid);
-            event.getClickedBlock().setType(Material.AIR);
-
-            tm.incrementRepaired(p);
+            loc.getBlock().setType(Material.AIR);
+            arena.incrementRepaired(p);
         } else {
             repairProgress.put(uuid, progress);
             String bar = getProgressBar(progress, max);
@@ -126,10 +160,7 @@ public class GameListener implements Listener {
 
     private String getProgressBar(int current, int max) {
         int totalBars = 20;
-        // Используем Math.ceil, чтобы даже минимальный прогресс давал 1 деление,
-        // а финальный клик закрашивал всю полоску.
         int completed = (int) Math.ceil((double) current / max * totalBars);
-
         StringBuilder sb = new StringBuilder("§eЧиним: §a");
         for (int i = 0; i < totalBars; i++) {
             if (i == completed) sb.append("§7");
@@ -139,10 +170,9 @@ public class GameListener implements Listener {
     }
 
     @EventHandler
-    public void onChat(org.bukkit.event.player.AsyncPlayerChatEvent event) {
+    public void onChat(AsyncPlayerChatEvent event) {
         Player p = event.getPlayer();
-        // Если игра идет — используем дисплейнейм с префиксом
-        if (plugin.getGameManager().getGameState() == GameState.INGAME) {
+        if (getActiveMatch(p) != null) {
             event.setFormat(p.getDisplayName() + "§7: §f" + event.getMessage());
         }
     }
@@ -150,56 +180,132 @@ public class GameListener implements Listener {
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onCombat(EntityDamageByEntityEvent event) {
         if (!(event.getDamager() instanceof Player && event.getEntity() instanceof Player)) return;
+        Player damager = (Player) event.getDamager();
+        Player victim = (Player) event.getEntity();
 
-        Player d = (Player) event.getDamager();
-        Player v = (Player) event.getEntity();
-        TeamManager tm = plugin.getTeamManager();
-
-        UUID damagerID = d.getUniqueId();
-        UUID victimID = v.getUniqueId();
-
-        // Отключаем обычный урон, чтобы никто никого не убил
-        event.setCancelled(true);
-
-        // СИТУАЦИЯ А: Охранник бьет Заключенного (Ловит)
-        if (tm.getGuards().contains(damagerID) && tm.getPrisoners().contains(victimID)) {
-            // Проверяем, что в руке именно железный меч
-            if (d.getInventory().getItemInMainHand().getType() == Material.IRON_SWORD) {
-                // Ловим только если он еще не пойман и его не тащат
-                if (!tm.getCapturedPrisoners().contains(victimID) && !tm.getDragging().containsValue(victimID)) {
-                    tm.startDragging(d, v);
-                }
-            }
-            return; // Выходим из метода
+        if (plugin.getArenaManager().isLobbyWorld(damager.getWorld())
+                && plugin.getArenaManager().isLobbyWorld(victim.getWorld())) {
+            event.setCancelled(true);
+            return;
         }
 
-        // СИТУАЦИЯ Б: Заключенный бьет Заключенного (Спасает)
-        if (tm.getPrisoners().contains(damagerID) && tm.getPrisoners().contains(victimID)) {
+        Arena da = getActiveMatch(damager);
+        Arena va = getActiveMatch(victim);
 
-            // 1. САМОПРОВЕРКА: Если атакующий зэк сам в камере или его тащат — он не может спасать
-            if (tm.getCapturedPrisoners().contains(damagerID) || tm.getDragging().containsValue(damagerID)) {
-                return;
+        if (va != null && da == va) {
+            event.setCancelled(true);
+            if (isGuardCatchingPrisoner(da, damager, victim)) {
+                handleGuardCatch(da, damager, victim);
+            } else if (isPrisonerRescuing(da, damager, victim)) {
+                handlePrisonerRescue(da, damager, victim);
             }
+            return;
+        }
 
-            // 2. ПРОВЕРКА ЦЕЛИ: Если цель в камере ИЛИ цель тащат охранником — освобождаем
-            if (tm.getCapturedPrisoners().contains(victimID) || tm.getDragging().containsValue(victimID)) {
-                tm.release(v);
-
-                d.sendMessage("§a§l[!] §fТы освободил §e" + v.getName() + "§f!");
-                v.sendMessage("§a§l[!] §e" + d.getName() + " §fспас тебя!");
-            }
+        if (damager.getWorld().getName().startsWith("run_") || victim.getWorld().getName().startsWith("run_")) {
+            event.setCancelled(true);
         }
     }
 
-    @EventHandler public void onQuit(PlayerQuitEvent e) { plugin.getTeamManager().handleQuit(e.getPlayer()); }
+    private boolean isGuardCatchingPrisoner(Arena arena, Player damager, Player victim) {
+        return arena.getGuards().contains(damager.getUniqueId())
+                && arena.getPrisoners().contains(victim.getUniqueId());
+    }
+
+    private boolean isPrisonerRescuing(Arena arena, Player damager, Player victim) {
+        return arena.getPrisoners().contains(damager.getUniqueId())
+                && arena.getPrisoners().contains(victim.getUniqueId());
+    }
+
+    private void handleGuardCatch(Arena arena, Player guard, Player prisoner) {
+        if (guard.getInventory().getItemInMainHand().getType() != Material.IRON_SWORD) return;
+        UUID prisonerId = prisoner.getUniqueId();
+        if (!arena.getCapturedPrisoners().contains(prisonerId) && !arena.getDragging().containsValue(prisonerId)) {
+            arena.startDragging(guard, prisoner);
+        }
+    }
+
+    private void handlePrisonerRescue(Arena arena, Player rescuer, Player victim) {
+        UUID rescuerId = rescuer.getUniqueId();
+        UUID victimId = victim.getUniqueId();
+        if (arena.getCapturedPrisoners().contains(rescuerId) || arena.getDragging().containsValue(rescuerId)) {
+            return;
+        }
+        if (arena.getCapturedPrisoners().contains(victimId) || arena.getDragging().containsValue(victimId)) {
+            arena.release(victim);
+            rescuer.sendMessage("§a§l[!] §fТы освободил §e" + victim.getName() + "§f!");
+            victim.sendMessage("§a§l[!] §e" + rescuer.getName() + " §fспас тебя!");
+        }
+    }
+
+    @EventHandler
+    public void onQuit(PlayerQuitEvent e) {
+        plugin.getArenaManager().handlePlayerQuit(e.getPlayer());
+    }
 
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
-        if (plugin.getGameManager().getGameState() == GameState.INGAME) {
-            Location lobby = plugin.getConfigManager().getLoc("lobby");
-            if (lobby != null) event.getPlayer().teleport(lobby);
+        Player p = event.getPlayer();
+        Bukkit.getScheduler().runTaskLater(plugin, () -> applyLobbyOnJoin(p), 1L);
+    }
+
+    private void applyLobbyOnJoin(Player p) {
+        if (!p.isOnline()) return;
+        plugin.getArenaManager().handlePlayerQuit(p);
+        p.getInventory().clear();
+        for (org.bukkit.potion.PotionEffect ef : p.getActivePotionEffects()) {
+            p.removePotionEffect(ef.getType());
+        }
+        p.setGameMode(GameMode.ADVENTURE);
+        p.setAllowFlight(true);
+        p.setFlying(false);
+        Location lobby = plugin.getArenaManager().resolveLobbySpawn();
+        if (lobby != null) {
+            p.teleport(lobby);
         }
     }
 
-    public void clearProgress() { repairProgress.clear(); currentRepairingBlock.clear(); }
+    @EventHandler
+    public void onDeath(PlayerDeathEvent event) {
+        Player p = event.getEntity();
+        Arena a = plugin.getArenaManager().getArenaByPlayer(p);
+        if (a != null) {
+            a.removePlayer(p);
+            a.checkWinConditions();
+        }
+        event.getDrops().clear();
+        event.setKeepInventory(false);
+        event.setKeepLevel(false);
+    }
+
+    @EventHandler
+    public void onRespawn(PlayerRespawnEvent event) {
+        Location lobby = plugin.getArenaManager().resolveLobbySpawn();
+        if (lobby != null) {
+            event.setRespawnLocation(lobby);
+        }
+        Player p = event.getPlayer();
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            if (!p.isOnline()) return;
+            p.getInventory().clear();
+            p.setGameMode(GameMode.ADVENTURE);
+            p.setAllowFlight(true);
+            p.setFlying(false);
+            for (org.bukkit.potion.PotionEffect ef : p.getActivePotionEffects()) {
+                p.removePotionEffect(ef.getType());
+            }
+        });
+    }
+
+    @EventHandler
+    public void onCreatureSpawnInLobby(CreatureSpawnEvent event) {
+        if (plugin.getArenaManager().isLobbyWorld(event.getLocation().getWorld())) {
+            event.setCancelled(true);
+        }
+    }
+
+    public void clearProgress() {
+        repairProgress.clear();
+        currentRepairingBlock.clear();
+    }
 }

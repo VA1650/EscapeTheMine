@@ -2,7 +2,7 @@ package me.annie312;
 
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
-import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.World;
 
 public class ConfigManager {
     private final EscapeTheMine plugin;
@@ -16,31 +16,39 @@ public class ConfigManager {
         plugin.saveConfig();
     }
 
-
-    // Сохранение локации в config.yml
     public void saveLoc(String path, Location loc) {
-        FileConfiguration config = plugin.getConfig();
-        config.set(path + ".world", loc.getWorld().getName());
-        config.set(path + ".x", loc.getX());
-        config.set(path + ".y", loc.getY());
-        config.set(path + ".z", loc.getZ());
-        config.set(path + ".yaw", loc.getYaw());
-        config.set(path + ".pitch", loc.getPitch());
+        plugin.getConfig().set(path + ".world", loc.getWorld().getName());
+        plugin.getConfig().set(path + ".x", loc.getX());
+        plugin.getConfig().set(path + ".y", loc.getY());
+        plugin.getConfig().set(path + ".z", loc.getZ());
+        plugin.getConfig().set(path + ".yaw", loc.getYaw());
+        plugin.getConfig().set(path + ".pitch", loc.getPitch());
         plugin.saveConfig();
     }
 
-    // Получение локации из config.yml
     public Location getLoc(String path) {
-        FileConfiguration config = plugin.getConfig();
-        if (!config.contains(path)) return null;
+        if (!plugin.getConfig().contains(path)) return null;
 
         return new Location(
-                Bukkit.getWorld(config.getString(path + ".world")),
-                config.getDouble(path + ".x"),
-                config.getDouble(path + ".y"),
-                config.getDouble(path + ".z"),
-                (float) config.getDouble(path + ".yaw"),
-                (float) config.getDouble(path + ".pitch")
+                Bukkit.getWorld(plugin.getConfig().getString(path + ".world")),
+                plugin.getConfig().getDouble(path + ".x"),
+                plugin.getConfig().getDouble(path + ".y"),
+                plugin.getConfig().getDouble(path + ".z"),
+                (float) plugin.getConfig().getDouble(path + ".yaw"),
+                (float) plugin.getConfig().getDouble(path + ".pitch")
+        );
+    }
+
+    /** Те же координаты, что в конфиге ETM, но в мире инстанса арены (world из шаблона в конфиге игнорируется). */
+    public Location getLocInWorld(World arenaWorld, String path) {
+        if (arenaWorld == null || !plugin.getConfig().contains(path + ".x")) return null;
+        return new Location(
+                arenaWorld,
+                plugin.getConfig().getDouble(path + ".x"),
+                plugin.getConfig().getDouble(path + ".y"),
+                plugin.getConfig().getDouble(path + ".z"),
+                (float) plugin.getConfig().getDouble(path + ".yaw"),
+                (float) plugin.getConfig().getDouble(path + ".pitch")
         );
     }
 }
